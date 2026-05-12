@@ -1,0 +1,99 @@
+name: Build Binaries
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 1'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Set date tag
+        run: echo "TAG=v$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install UPX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx
+
+      - name: Get sing-box latest release tag
+        id: singbox_tag
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Get cloudflared latest release tag
+        id: cloudflared_tag
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Clone sing-box
+        run: |
+          git clone https://github.com/SagerNet/sing-box.git sing-box
+          cd sing-box
+          git checkout ${{ steps.singbox_tag.outputs.tag }}
+
+      - name: Clone cloudflared
+        run: |
+          git clone https://github.com/cloudflare/cloudflared.git cloudflared
+          cd cloudflared
+          git checkout ${{ steps.cloudflared_tag.outputs.tag }}
+
+      - name: Build sing-box (linux/amd64)
+        run: |
+          cd sing-box
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -buildid=" -tags "with_utls" -o ../web-linux-amd64 ./cmd/sing-box
+
+      - name: Build sing-box (linux/arm64)
+        run: |
+          cd sing-box
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buildid=" -tags "with_utls" -o ../web-linux-arm64 ./cmd/sing-box
+
+      - name: Build cloudflared (linux/amd64)
+        run: |
+          cd cloudflared
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -buildid=" -o ../bot-linux-amd64 ./cmd/cloudflared
+
+      - name: Build cloudflared (linux/arm64)
+        run: |
+          cd cloudflared
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buildid=" -o ../bot-linux-arm64 ./cmd/cloudflared
+
+      - name: Compress with UPX
+        run: |
+          upx --best --lzma web-linux-amd64
+          upx --best --lzma bot-linux-amd64
+          upx --best --lzma web-linux-arm64 || true
+          upx --best --lzma bot-linux-arm64 || true
+
+      - name: Delete existing release
+        run: |
+          gh release delete ${{ env.TAG }} --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+
+      - name: Create Release and Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          body: |
+            Automated build on ${{ env.TAG }}
+            - sing-box: ${{ steps.singbox_tag.outputs.tag }}
+            - cloudflared: ${{ steps.cloudflared_tag.outputs.tag }}
+          files: |
+            web-linux-amd64
+            web-linux-arm64
+            bot-linux-amd64
+            bot-linux-arm64
