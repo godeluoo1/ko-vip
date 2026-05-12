@@ -28,10 +28,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y upx
 
-      - name: Get sing-box latest release tag
-        id: singbox_tag
+      - name: Get Xray latest release tag
+        id: xray_tag
         run: |
-          TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name')
+          TAG=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Get cloudflared latest release tag
@@ -40,11 +40,11 @@ jobs:
           TAG=$(curl -s https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name')
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Clone sing-box
+      - name: Clone Xray
         run: |
-          git clone https://github.com/SagerNet/sing-box.git sing-box
-          cd sing-box
-          git checkout ${{ steps.singbox_tag.outputs.tag }}
+          git clone https://github.com/XTLS/Xray-core.git xray
+          cd xray
+          git checkout ${{ steps.xray_tag.outputs.tag }}
 
       - name: Clone cloudflared
         run: |
@@ -52,15 +52,15 @@ jobs:
           cd cloudflared
           git checkout ${{ steps.cloudflared_tag.outputs.tag }}
 
-      - name: Build sing-box (linux/amd64)
+      - name: Build Xray (linux/amd64)
         run: |
-          cd sing-box
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -buildid=" -tags "with_utls" -o ../web-linux-amd64 ./cmd/sing-box
+          cd xray
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -buildid=" -o ../web-linux-amd64 ./main
 
-      - name: Build sing-box (linux/arm64)
+      - name: Build Xray (linux/arm64)
         run: |
-          cd sing-box
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buildid=" -tags "with_utls" -o ../web-linux-arm64 ./cmd/sing-box
+          cd xray
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buildid=" -o ../web-linux-arm64 ./main
 
       - name: Build cloudflared (linux/amd64)
         run: |
@@ -93,7 +93,7 @@ jobs:
           name: ${{ env.TAG }}
           body: |
             Automated build on ${{ env.TAG }}
-            - sing-box: ${{ steps.singbox_tag.outputs.tag }}
+            - xray: ${{ steps.xray_tag.outputs.tag }}
             - cloudflared: ${{ steps.cloudflared_tag.outputs.tag }}
           files: |
             web-linux-amd64
