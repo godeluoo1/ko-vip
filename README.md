@@ -1,6 +1,6 @@
 # ko-vip
 
-自动编译 [sing-box](https://github.com/SagerNet/sing-box) 和 [cloudflared](https://github.com/cloudflare/cloudflared) 二进制文件，供 ko 主项目下载使用。
+自动编译 [Xray](https://github.com/XTLS/Xray-core) 和 [cloudflared](https://github.com/cloudflare/cloudflared) 二进制文件，供 ko 主项目下载使用。
 
 ## 用途
 
@@ -10,8 +10,8 @@
 
 | 文件名 | 对应程序 | 架构 |
 |--------|----------|------|
-| `web-linux-amd64` | sing-box | linux/amd64 |
-| `web-linux-arm64` | sing-box | linux/arm64 |
+| `web-linux-amd64` | Xray | linux/amd64 |
+| `web-linux-arm64` | Xray | linux/arm64 |
 | `bot-linux-amd64` | cloudflared | linux/amd64 |
 | `bot-linux-arm64` | cloudflared | linux/arm64 |
 
@@ -27,7 +27,6 @@
 | `CGO_ENABLED=0` | 纯静态编译，无 C 依赖，兼容所有 Linux 环境 |
 | `-trimpath` | 移除编译路径信息，消除本地路径泄露 |
 | `-ldflags="-s -w -buildid="` | 剥离符号表和调试信息，清空 buildid |
-| `-tags "with_utls"` | sing-box 启用 uTLS 指纹伪装支持 |
 | UPX `--best --lzma` | 极限压缩，大幅缩减二进制体积 |
 
 ## 在 ko 主项目中引用
