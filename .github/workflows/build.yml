@@ -45,7 +45,9 @@ jobs:
           git checkout ${{ steps.xray_tag.outputs.tag }}
           # 插入 garble:keep 标记以防止编译反射 Panic
           sed -i 's/type CommandEnvHolder struct/\/\/garble:keep\ntype CommandEnvHolder struct/g' main/commands/base/env.go
-          sed -i 's/type tmplData struct/\/\/garble:keep\ntype tmplData struct/g' main/commands/base/help.go
+          # 将未导出的 tmplData 替换为导出的 TmplData，使 garble:keep 完全生效
+          sed -i 's/\btmplData\b/TmplData/g' main/commands/base/help.go
+          sed -i 's/type TmplData struct/\/\/garble:keep\ntype TmplData struct/g' main/commands/base/help.go
           sed -i 's/type Command struct/\/\/garble:keep\ntype Command struct/g' main/commands/base/command.go
 
       - name: Clone cloudflared
