@@ -43,12 +43,49 @@ jobs:
           git clone https://github.com/XTLS/Xray-core.git xray
           cd xray
           git checkout ${{ steps.xray_tag.outputs.tag }}
-          # 插入 garble:keep 标记以防止编译反射 Panic
-          sed -i 's/type CommandEnvHolder struct/\/\/garble:keep\ntype CommandEnvHolder struct/g' main/commands/base/env.go
-          # 将未导出的 tmplData 替换为导出的 TmplData，使 garble:keep 完全生效
-          sed -i 's/\btmplData\b/TmplData/g' main/commands/base/help.go
-          sed -i 's/type TmplData struct/\/\/garble:keep\ntype TmplData struct/g' main/commands/base/help.go
-          sed -i 's/type Command struct/\/\/garble:keep\ntype Command struct/g' main/commands/base/command.go
+          # 注入 Map 动态转换逻辑，阻断反射并支持 garble 极致混淆
+          sed -i '/func tmpl(w io.Writer, text string, data interface{}) {/a \	if td, ok := data.(tmplData); ok { data = tmplDataToMap(td) } else if cmd, ok := data.(*Command); ok { data = commandToMap(cmd) }' main/commands/base/help.go
+          cat << 'EOF' >> main/commands/base/help.go
+
+          func commandToMap(c *Command) map[string]interface{} {
+          	if c == nil {
+          		return nil
+          	}
+          	m := make(map[string]interface{})
+          	m["Runnable"] = c.Runnable()
+          	m["UsageLine"] = c.UsageLine
+          	m["Short"] = c.Short
+          	m["Long"] = c.Long
+          	m["LongName"] = c.LongName()
+          	m["Name"] = c.Name()
+          	var subs []interface{}
+          	for _, sub := range c.Commands {
+          		subs = append(subs, commandToMap(sub))
+          	}
+          	m["Commands"] = subs
+          	return m
+          }
+
+          func tmplDataToMap(d tmplData) map[string]interface{} {
+          	m := make(map[string]interface{})
+          	m["Exec"] = CommandEnv.Exec
+          	m["CommandsWidth"] = CommandEnv.CommandsWidth
+          	if d.Command != nil {
+          		m["Runnable"] = d.Command.Runnable()
+          		m["UsageLine"] = d.Command.UsageLine
+          		m["Short"] = d.Command.Short
+          		m["Long"] = d.Command.Long
+          		m["LongName"] = d.Command.LongName()
+          		m["Name"] = d.Command.Name()
+          		var subs []interface{}
+          		for _, sub := range d.Command.Commands {
+          			subs = append(subs, commandToMap(sub))
+          		}
+          		m["Commands"] = subs
+          	}
+          	return m
+          }
+          EOF
 
       - name: Clone cloudflared
         run: |
