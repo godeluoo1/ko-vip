@@ -1,124 +1,35 @@
-name: Build Binaries
+name: Sync Binaries
 
 on:
   workflow_dispatch:
   schedule:
     - cron: '0 2 * * 1'
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
-  build:
+  sync:
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Set date tag
-        run: echo "TAG=v$(date +'%Y-%m-%d')" >> $GITHUB_ENV
-
-      - name: Install Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-
-      - name: Install Garble
-        run: go install mvdan.cc/garble@latest
-
-      - name: Get Xray latest release tag
-        id: xray_tag
-        run: |
-          TAG=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
       - name: Get cloudflared latest release tag
         id: cloudflared_tag
         run: |
           TAG=$(curl -s https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name')
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Clone Xray
+      - name: Download official binaries
         run: |
-          git clone https://github.com/XTLS/Xray-core.git xray
-          cd xray
-          git checkout ${{ steps.xray_tag.outputs.tag }}
-          # 注入 Map 动态转换逻辑，阻断反射并支持 garble 极致混淆
-          sed -i '/func tmpl(w io.Writer, text string, data interface{}) {/a \	if td, ok := data.(tmplData); ok { data = tmplDataToMap(td) } else if cmd, ok := data.(*Command); ok { data = commandToMap(cmd) }' main/commands/base/help.go
-          cat << 'EOF' >> main/commands/base/help.go
-
-          func commandToMap(c *Command) map[string]interface{} {
-          	if c == nil {
-          		return nil
-          	}
-          	m := make(map[string]interface{})
-          	m["Runnable"] = c.Runnable()
-          	m["UsageLine"] = c.UsageLine
-          	m["Short"] = c.Short
-          	m["Long"] = c.Long
-          	m["LongName"] = c.LongName()
-          	m["Name"] = c.Name()
-          	var subs []interface{}
-          	for _, sub := range c.Commands {
-          		subs = append(subs, commandToMap(sub))
-          	}
-          	m["Commands"] = subs
-          	return m
-          }
-
-          func tmplDataToMap(d tmplData) map[string]interface{} {
-          	m := make(map[string]interface{})
-          	m["Exec"] = CommandEnv.Exec
-          	m["CommandsWidth"] = CommandEnv.CommandsWidth
-          	if d.Command != nil {
-          		m["Runnable"] = d.Command.Runnable()
-          		m["UsageLine"] = d.Command.UsageLine
-          		m["Short"] = d.Command.Short
-          		m["Long"] = d.Command.Long
-          		m["LongName"] = d.Command.LongName()
-          		m["Name"] = d.Command.Name()
-          		var subs []interface{}
-          		for _, sub := range d.Command.Commands {
-          			subs = append(subs, commandToMap(sub))
-          		}
-          		m["Commands"] = subs
-          	}
-          	return m
-          }
-          EOF
-
-      - name: Clone cloudflared
-        run: |
-          git clone https://github.com/cloudflare/cloudflared.git cloudflared
-          cd cloudflared
-          git checkout ${{ steps.cloudflared_tag.outputs.tag }}
-
-      - name: Build Xray (linux/amd64)
-        run: |
-          cd xray
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 ~/go/bin/garble -literals -seed=random build -trimpath -ldflags="-s -w -buildid=" -o ../web-linux-amd64 ./main
-
-      - name: Build Xray (linux/arm64)
-        run: |
-          cd xray
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 ~/go/bin/garble -literals -seed=random build -trimpath -ldflags="-s -w -buildid=" -o ../web-linux-arm64 ./main
-
-      - name: Build cloudflared (linux/amd64)
-        run: |
-          cd cloudflared
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -buildid=" -o ../bot-linux-amd64 ./cmd/cloudflared
-
-      - name: Build cloudflared (linux/arm64)
-        run: |
-          cd cloudflared
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buildid=" -o ../bot-linux-arm64 ./cmd/cloudflared
-
-      - name: Skip UPX to save memory and CPU on PaaS
-        run: echo "Skipping UPX compression"
+          TAG="${{ steps.cloudflared_tag.outputs.tag }}"
+          echo "Downloading cloudflared version $TAG"
+          curl -Lo bot-linux-amd64 "https://github.com/cloudflare/cloudflared/releases/download/${TAG}/cloudflared-linux-amd64"
+          curl -Lo bot-linux-arm64 "https://github.com/cloudflare/cloudflared/releases/download/${TAG}/cloudflared-linux-arm64"
+          chmod +x bot-linux-amd64 bot-linux-arm64
 
       - name: Delete existing release
         run: |
-          gh release delete ${{ env.TAG }} --yes --cleanup-tag || true
+          TAG="${{ steps.cloudflared_tag.outputs.tag }}"
+          gh release delete "$TAG" --yes --cleanup-tag || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -126,14 +37,12 @@ jobs:
       - name: Create Release and Upload
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.TAG }}
-          name: ${{ env.TAG }}
+          tag_name: ${{ steps.cloudflared_tag.outputs.tag }}
+          name: ${{ steps.cloudflared_tag.outputs.tag }}
           body: |
-            Automated build on ${{ env.TAG }}
-            - xray: ${{ steps.xray_tag.outputs.tag }}
-            - cloudflared: ${{ steps.cloudflared_tag.outputs.tag }}
+            Automated sync of cloudflared official release
+            - Version: ${{ steps.cloudflared_tag.outputs.tag }}
+            - Pure official binaries renamed for ko main project use.
           files: |
-            web-linux-amd64
-            web-linux-arm64
             bot-linux-amd64
             bot-linux-arm64
