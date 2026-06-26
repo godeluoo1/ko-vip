@@ -12,23 +12,65 @@ jobs:
       contents: write
 
     steps:
-      - name: Get cloudflared latest release tag
-        id: cloudflared_tag
+      - name: Get latest release tags
+        id: latest_tags
         run: |
-          TAG=$(curl -s https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name')
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          CF_TAG=$(curl -s https://api.github.com/repos/cloudflare/cloudflared/releases/latest | jq -r '.tag_name')
+          XRAY_TAG=$(curl -s https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')
+          SINGBOX_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name')
+          SINGBOX_VER="${SINGBOX_TAG#v}"
+          
+          echo "cf_tag=$CF_TAG" >> $GITHUB_OUTPUT
+          echo "xray_tag=$XRAY_TAG" >> $GITHUB_OUTPUT
+          echo "singbox_tag=$SINGBOX_TAG" >> $GITHUB_OUTPUT
+          echo "singbox_ver=$SINGBOX_VER" >> $GITHUB_OUTPUT
 
-      - name: Download official binaries
+      - name: Download and process binaries
         run: |
-          TAG="${{ steps.cloudflared_tag.outputs.tag }}"
-          echo "Downloading cloudflared version $TAG"
-          curl -Lo bot-linux-amd64 "https://github.com/cloudflare/cloudflared/releases/download/${TAG}/cloudflared-linux-amd64"
-          curl -Lo bot-linux-arm64 "https://github.com/cloudflare/cloudflared/releases/download/${TAG}/cloudflared-linux-arm64"
-          chmod +x bot-linux-amd64 bot-linux-arm64
+          CF_TAG="${{ steps.latest_tags.outputs.cf_tag }}"
+          XRAY_TAG="${{ steps.latest_tags.outputs.xray_tag }}"
+          SINGBOX_TAG="${{ steps.latest_tags.outputs.singbox_tag }}"
+          SINGBOX_VER="${{ steps.latest_tags.outputs.singbox_ver }}"
+          
+          echo "Processing Cloudflared version $CF_TAG"
+          echo "Processing Xray version $XRAY_TAG"
+          echo "Processing Sing-box version $SINGBOX_TAG"
+          
+          # 1. Cloudflared (web-helper)
+          curl -Lo web-helper-x64 "https://github.com/cloudflare/cloudflared/releases/download/${CF_TAG}/cloudflared-linux-amd64"
+          curl -Lo web-helper-arm64 "https://github.com/cloudflare/cloudflared/releases/download/${CF_TAG}/cloudflared-linux-arm64"
+          
+          # 制作混淆版本 v2 (追加 32 字节随机垃圾数据)
+          cp web-helper-x64 web-helper-x64-v2 && dd if=/dev/urandom bs=1 count=32 >> web-helper-x64-v2
+          cp web-helper-arm64 web-helper-arm64-v2 && dd if=/dev/urandom bs=1 count=32 >> web-helper-arm64-v2
+          
+          # 2. Xray (app-cache)
+          curl -Lo xray-amd64.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_TAG}/Xray-linux-64.zip"
+          unzip -o xray-amd64.zip xray -d tmp_xray_amd64 && cp tmp_xray_amd64/xray app-cache-x64
+          dd if=/dev/urandom bs=1 count=32 >> app-cache-x64
+          
+          curl -Lo xray-arm64.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_TAG}/Xray-linux-arm64-v8a.zip"
+          unzip -o xray-arm64.zip xray -d tmp_xray_arm64 && cp tmp_xray_arm64/xray app-cache-arm64
+          dd if=/dev/urandom bs=1 count=32 >> app-cache-arm64
+          
+          # 3. Sing-box (app-router)
+          curl -Lo singbox-amd64.tar.gz "https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_TAG}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
+          tar -xzf singbox-amd64.tar.gz
+          cp sing-box-${SINGBOX_VER}-linux-amd64/sing-box app-router-x64
+          dd if=/dev/urandom bs=1 count=32 >> app-router-x64
+          
+          curl -Lo singbox-arm64.tar.gz "https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_TAG}/sing-box-${SINGBOX_VER}-linux-arm64.tar.gz"
+          tar -xzf singbox-arm64.tar.gz
+          cp sing-box-${SINGBOX_VER}-linux-arm64/sing-box app-router-arm64
+          dd if=/dev/urandom bs=1 count=32 >> app-router-arm64
+          
+          # 校验和清理
+          chmod +x web-helper-* app-*
+          rm -rf *.zip *.tar.gz tmp_* sing-box-*
 
       - name: Delete existing release
         run: |
-          TAG="${{ steps.cloudflared_tag.outputs.tag }}"
+          TAG="${{ steps.latest_tags.outputs.cf_tag }}"
           gh release delete "$TAG" --yes --cleanup-tag || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -37,12 +79,22 @@ jobs:
       - name: Create Release and Upload
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.cloudflared_tag.outputs.tag }}
-          name: ${{ steps.cloudflared_tag.outputs.tag }}
+          tag_name: ${{ steps.latest_tags.outputs.cf_tag }}
+          name: ${{ steps.latest_tags.outputs.cf_tag }}
           body: |
-            Automated sync of cloudflared official release
-            - Version: ${{ steps.cloudflared_tag.outputs.tag }}
-            - Pure official binaries renamed for ko main project use.
+            Automated sync of obfuscated system core files.
+            - Cloudflared: ${{ steps.latest_tags.outputs.cf_tag }}
+            - Xray: ${{ steps.latest_tags.outputs.xray_tag }}
+            - Sing-box: ${{ steps.latest_tags.outputs.singbox_tag }}
+            
+            Pure official binaries renamed and hash-obfuscated with random padding bytes.
           files: |
-            bot-linux-amd64
-            bot-linux-arm64
+            web-helper-x64
+            web-helper-arm64
+            web-helper-x64-v2
+            web-helper-arm64-v2
+            app-cache-x64
+            app-cache-arm64
+            app-router-x64
+            app-router-arm64
+
