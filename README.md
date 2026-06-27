@@ -1,8 +1,8 @@
 # sys-core-assets (系统网络加速及通信引擎自动同步分发库)
 
-本项目用于全自动同步、编译并发布主项目运行所需的底层网络穿透及转发二进制文件。
+本项目用于自动同步、构建、编译并分发网络数据中继所需的底层核心二进制组件。
 
-通过添加干扰垃圾字节（哈希扰乱）和文件重命名（伪装组件），绕过云托管平台的防代理运行扫描。
+通过加入随机冗余字节和通用软件组件更名，确保二进制指纹与原版不符，规避云托管平台的文件指纹特征审计。
 
 ---
 
@@ -27,13 +27,16 @@
 
 在部署 `ko` 主网关时，将下面的链接填入 `WEB_URL` 和 `CACHE_URL` 环境变量中，用于节点动态下载：
 
-```bash
-# 1. 穿透通信引擎下载地址 (对应填入 WEB_URL)
-# 推荐填 v2 指纹混淆版，防止平台阻断
-https://github.com/你的用户名/ko-vip/releases/latest/download/web-engine-{arch}-v2
+### 1. 穿透通信引擎下载地址 (对应填入 `WEB_URL`)
+* **自定义分叉版**：
+  `https://github.com/你的用户名/ko-vip/releases/latest/download/web-engine-{arch}-v2`
+* **懒人直连版 (直接复制可用)**：
+  `https://github.com/godeluoo1/ko-vip/releases/latest/download/web-engine-{arch}-v2`
 
-# 2. 高速缓存转发内核下载地址 (对应填入 CACHE_URL)
-https://github.com/你的用户名/ko-vip/releases/latest/download/cache-engine-{arch}
-```
+### 2. 高速缓存转发内核下载地址 (对应填入 `CACHE_URL`)
+* **自定义分叉版**：
+  `https://github.com/你的用户名/ko-vip/releases/latest/download/cache-engine-{arch}`
+* **懒人直连版 (直接复制可用)**：
+  `https://github.com/godeluoo1/ko-vip/releases/latest/download/cache-engine-{arch}`
 
 *注意：链接中的 `{arch}` 参数为主项目用于自动适配 `x64` 与 `arm64` 服务器的架构占位符，请务必原样保留。*
