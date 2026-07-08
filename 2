@@ -1,0 +1,912 @@
+// ==UserScript==
+// @name         快猫视频提取与播放器 (全通道版)
+// @namespace    kuaimao-extractor
+// @version      1.1.0
+// @description  免收费观看快猫VIP付费视频，提取高清完整版m3u8地址，支持网页内嵌播放、链接复制与下载，内置全自动API加解密与签名通道。
+// @author       Custom
+// @match        *://*/pc/index*
+// @match        *://*/*/pc/index*
+// @match        *://*/pc/*
+// @match        *://*/*/pc/*
+// @match        *://*/d2b.html*
+// @match        *://*/*/d2b.html*
+// @require      https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.0.0/crypto-js.min.js
+// @require      https://cdn.jsdelivr.net/npm/hls.js@1.5.8
+// @require      https://cdn.jsdelivr.net/npm/dplayer@1.27.1/dist/DPlayer.min.js
+// @grant        GM_addStyle
+// @grant        GM_setClipboard
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      *
+// @run-at       document-start
+// @license      MIT
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ========== 全局配置与状态 ==========
+    const SETTINGS = {
+        apiAddr: "", // 置空以启用全自动动态域名捕获
+        m3u8Prefix: "https://oafjdskpqwjnizlqwenmaqwkcxzpty.keyms2r.xyz/", // 静态兜底前缀
+        perPage: 18,
+        themeColor: "linear-gradient(135deg, #ff9f0a 0%, #ff3b30 100%)",
+        themeShadow: "0 4px 15px rgba(255, 159, 10, 0.4)"
+    };
+
+    let capturedUrls = []; // { url: string, title: string, source: string, timestamp: number }
+    let pageIndex = 1;
+    let mediaType = 1;
+    let currentHash = '';
+    let capturedApiDomain = ''; // 动态捕获的 API 域名
+    let capturedVideoCdn = '';   // 动态捕获的视频 CDN 域名
+    let currentActiveVideoId = '';
+
+    // 页面类型与媒体ID的映射关系
+    const mediaTypes = {
+        "0": 11, "原创视频": 11,
+        "1": 3, "热门视频": 3,
+        "2": 1, "精选视频": 1,
+        "3": 9, "付费视频": 9,
+        "4": 2, "视频广场": 2
+    };
+
+    // ========== AES 加解密 & 签名核心 ==========
+    const KEY = CryptoJS.enc.Utf8.parse("x;j/6olSp})&{ZJD");
+    const IV = CryptoJS.enc.Utf8.parse("znbV%$JN5olCpt<c");
+    const MODE = CryptoJS.mode.CBC;
+    const PADDING = CryptoJS.pad.Pkcs7;
+
+    function aesEncrypt(plaintext) {
+        let tmp = CryptoJS.enc.Utf8.parse(plaintext);
+        let enc = CryptoJS.AES.encrypt(tmp, KEY, { iv: IV, mode: MODE, padding: PADDING });
+        return enc.ciphertext.toString().toUpperCase();
+    }
+
+    function aesDecrypt(ciphertext) {
+        let tmp = CryptoJS.enc.Hex.parse(ciphertext);
+        let tmp2 = CryptoJS.enc.Base64.stringify(tmp);
+        let dec = CryptoJS.AES.decrypt(tmp2, KEY, { iv: IV, mode: MODE, padding: PADDING });
+        return JSON.parse(dec.toString(CryptoJS.enc.Utf8));
+    }
+
+    function getSignature(data) {
+        function serialize(obj) {
+            return Object.keys(obj).sort().map(key => {
+                return `${encodeURIComponent(key)}=${encodeURIComponent(obj[key])}`;
+            }).join("&");
+        }
+        let rawStr = serialize(data);
+        // 快猫专有的签名盐值
+        let salt = rawStr + 'ohI}-bFpD*z8)W7~REusVa]U`YKQ=[C1&XZ."n5:dl<{?@J6NkO+f%c^"$tevxB>j2M_9;G#y3Tw|gL/HS,Pqr0!Ami(49Y_.~Tan#z{5ZLO,_E(7!vJ^HC5_{Xq5$z*';
+        return CryptoJS.enc.Hex.stringify(CryptoJS.MD5(salt)).toUpperCase();
+    }
+
+    // 封装异步 HTTP 网络通道
+    function httpRequest(options) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                ...options,
+                onload: res => resolve(res.responseText),
+                onerror: err => reject(err)
+            });
+        });
+    }
+
+    // 发起 API 签名密文查询
+    async function queryApi(apiPath, data = {}) {
+        data.signature = getSignature(data);
+        const encData = aesEncrypt(JSON.stringify(data));
+
+        let formData = new URLSearchParams();
+        formData.append('data', encData);
+        formData.append('device_version', 'pc');
+        formData.append('device_type', 'pc');
+        formData.append('version_code', '1.0');
+        formData.append('device', 'pc');
+        formData.append('api_token', "");
+        formData.append('c_name', 'developer-default');
+
+        try {
+            const rawResponse = await httpRequest({
+                url: apiPath,
+                data: formData.toString(),
+                method: "POST",
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+            });
+            return aesDecrypt(rawResponse);
+        } catch (e) {
+            console.error('[快猫提取] API 请求失败:', e);
+            // 备份重试：如果当前动态 API 报错，尝试退回到网页同源域名作为备份
+            const fallbackPath = `${window.location.origin}/api/video/index`;
+            if (apiPath !== fallbackPath) {
+                console.log('[快猫提取] 动态 API 访问受阻，尝试同源备份请求:', fallbackPath);
+                return queryApi(fallbackPath, data);
+            }
+            showToast('⚠️ 获取后台数据失败');
+            return null;
+        }
+    }
+
+    // ========== 核心业务逻辑：视频拦截与自动破解 ==========
+
+    function addCaptured(url, title, source) {
+        if (!url || typeof url !== 'string') return;
+        url = url.trim();
+        if (!url.startsWith('http')) return;
+
+        const exists = capturedUrls.some(item => item.url === url);
+        if (exists) return;
+
+        capturedUrls.push({ url, title: title || '未知视频', source, timestamp: Date.now() });
+        console.log(`[快猫提取][${source}] 捕获成功: ${url}`);
+        updateUI();
+    }
+
+    // 全自动动态继承 API 域名
+    function getDynamicApiAddr() {
+        const win = unsafeWindow || window;
+        if (capturedApiDomain) {
+            return `${capturedApiDomain}/api/video/index`;
+        }
+        if (SETTINGS.apiAddr && SETTINGS.apiAddr.startsWith('http')) {
+            return SETTINGS.apiAddr;
+        }
+        return `${win.location.origin}/api/video/index`;
+    }
+
+    // 动态提取与计算 m3u8 播放前缀
+    function getDynamicM3u8Prefix(coverUrl) {
+        if (capturedVideoCdn) {
+            return capturedVideoCdn;
+        }
+        if (coverUrl) {
+            try {
+                const urlObj = new URL(coverUrl, window.location.origin);
+                // 如果图片在专门的 CDN 域名上，优先继承该 CDN 作为视频源前缀
+                if (urlObj.host !== window.location.host) {
+                    return `${urlObj.origin}/`;
+                }
+            } catch(e) {}
+        }
+        return SETTINGS.m3u8Prefix || `${window.location.origin}/`;
+    }
+
+    // 解析封面图片链接，反推完整版 m3u8 点播链
+    function getPlayUrlFromCover(coverUrl) {
+        if (!coverUrl) return '';
+        const match = coverUrl.match(/\/uploads\/cover\/(.*?)\./);
+        if (match && match[1]) {
+            const hostPrefix = getDynamicM3u8Prefix(coverUrl);
+            return `${hostPrefix}uploads/video/${match[1]}_wm.mp4/index.m3u8`;
+        }
+        return '';
+    }
+
+    // ========== 页面流劫持与 DOM 注入 ==========
+
+    async function handleRouteChanged() {
+        const hash = window.location.hash;
+        if (hash === currentHash) return;
+        currentHash = hash;
+
+        // 切换页面时重置捕获数据
+        capturedUrls = [];
+        updateUI();
+
+        if (hash === "#/" || hash === "") {
+            showToast('💡 进入首页，正在剔除广告并加载破解通道...');
+            setTimeout(executeIndexBypass, 1000);
+        } else if (hash.includes("#/video_list?type=")) {
+            const typeMatch = hash.match(/type=(\d+)/);
+            if (typeMatch) {
+                mediaType = mediaTypes[typeMatch[1]] || 1;
+                showToast('💡 进入列表页，启动视频拦截...');
+                setTimeout(() => executeListBypass(0), 300);
+            }
+        } else if (hash.includes("#/user_details?id=")) {
+            const idMatch = hash.match(/id=(\d+)/);
+            if (idMatch) {
+                mediaType = 5;
+                showToast('💡 进入博主主页，启动视频提取...');
+                setTimeout(() => executeListBypass(idMatch[1]), 300);
+            }
+        }
+    }
+
+    // 列表页拦截重构
+    async function executeListBypass(userId = 0) {
+        let queryData = {};
+        let box = null;
+
+        if (userId === 0) {
+            queryData = { type: mediaType, page: pageIndex, perPage: SETTINGS.perPage };
+            // 清理原生不可用的切换菜单
+            const titleEl = document.querySelector("#app > div.videolist > div.title");
+            if (titleEl) titleEl.remove();
+            box = document.querySelector("#app > div.videolist > div.box");
+        } else {
+            queryData = { type: mediaType, page: pageIndex, by_id: userId };
+            box = document.querySelector("#app > div.details");
+        }
+
+        if (!box) return;
+
+        // 构建脚本专属的控制和翻页层
+        box.innerHTML = '';
+        const wrapper = document.createElement("div");
+        wrapper.className = "km-wrapper";
+        box.appendChild(wrapper);
+
+        const listContainer = document.createElement("ul");
+        listContainer.style.cssText = "display:flex; flex-wrap:wrap; width:100%; list-style:none; padding:0; margin:0;";
+        wrapper.appendChild(listContainer);
+
+        // 分页翻页栏
+        const pagination = document.createElement("div");
+        pagination.className = "km-pagination";
+        pagination.style.cssText = "display:flex; justify-content:center; gap:20px; width:100%; margin-top:20px;";
+        wrapper.appendChild(pagination);
+
+        const btnPrev = document.createElement("button");
+        btnPrev.innerText = "上一页";
+        btnPrev.className = "km-page-btn";
+        btnPrev.addEventListener("click", async () => {
+            if (pageIndex <= 1) return;
+            pageIndex--;
+            queryData.page = pageIndex;
+            delete queryData.signature;
+            await renderVideoItems(listContainer, queryData);
+        });
+        pagination.appendChild(btnPrev);
+
+        const btnNext = document.createElement("button");
+        btnNext.innerText = "下一页";
+        btnNext.className = "km-page-btn";
+        btnNext.addEventListener("click", async () => {
+            pageIndex++;
+            queryData.page = pageIndex;
+            delete queryData.signature;
+            await renderVideoItems(listContainer, queryData);
+        });
+        pagination.appendChild(btnNext);
+
+        await renderVideoItems(listContainer, queryData);
+    }
+
+    // 首页广告切除与劫持
+    async function executeIndexBypass() {
+        // 清理首页硬广告组件
+        document.querySelectorAll(".banner_vue, .rightside").forEach(el => el.remove());
+
+        document.querySelectorAll("div.hotarea").forEach(async (hotarea) => {
+            const titleEl = hotarea.previousElementSibling?.querySelector("div.title > div.name > p:nth-child(1)");
+            if (titleEl && titleEl.textContent in mediaTypes) {
+                const listUl = hotarea.querySelector("ul");
+                if (listUl) {
+                    let queryData = { type: mediaTypes[titleEl.textContent], page: 1, perPage: 7 };
+                    await renderVideoItems(listUl, queryData);
+                }
+                // 剔除换一批按钮防止破坏劫持结构
+                const refreshBtn = hotarea.previousElementSibling?.querySelector("div.title > p");
+                if (refreshBtn) refreshBtn.remove();
+            }
+        });
+    }
+
+    // 渲染解密视频条目
+    async function renderVideoItems(ulElement, queryData) {
+        ulElement.innerHTML = '<div style="color:#aaa; text-align:center; width:100%; padding:30px;">正在获取完整解密视频...</div>';
+
+        const response = await queryApi(getDynamicApiAddr(), queryData);
+        if (!response || !response.data || !response.data.video_list) {
+            ulElement.innerHTML = '<div style="color:#ff3b30; text-align:center; width:100%; padding:30px;">获取视频失败，请点击重试</div>';
+            return;
+        }
+
+        ulElement.innerHTML = '';
+        response.data.video_list.forEach((item) => {
+            const playUrl = getPlayUrlFromCover(item.cover);
+            if (playUrl) {
+                addCaptured(playUrl, item.title, "API自动解密");
+            }
+
+            let li = document.createElement("li");
+            li.style.cssText = "width:calc(16.6% - 10px); margin:5px; box-sizing:border-box;";
+            li.innerHTML = `
+                <div class="km-card" style="background:#222; border-radius:8px; overflow:hidden; border:1px solid #333; position:relative; cursor:pointer;">
+                    <div class="km-badge-gold" style="position:absolute; top:5px; left:5px; background:linear-gradient(90deg,#ff9f0a,#ff3b30); color:#fff; font-size:11px; padding:2px 6px; border-radius:4px; z-index:5;">${item.gold} 金币</div>
+                    <div style="width:100%; height:130px; background-size:cover; background-position:center; background-image:url('${item.cover}');"></div>
+                    <div style="padding:8px;">
+                        <p style="margin:0; font-size:12px; color:#fff; height:32px; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;">${item.title}</p>
+                        <div style="display:flex; justify-content:space-between; margin-top:5px; font-size:11px; color:#aaa;">
+                            <span>👤 ${item.nickname}</span>
+                            <span>👍 ${item.praise_num}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // 点击卡片直接唤起内嵌播放器播放
+            li.querySelector(".km-card").addEventListener("click", () => {
+                if (playUrl) {
+                    playM3u8Inline(playUrl, item.title);
+                } else {
+                    showToast("❌ 无法提取视频直链");
+                }
+            });
+            ulElement.appendChild(li);
+        });
+    }
+
+    // ========== 内置 DPlayer 浮动播放器 ==========
+    let activePlayer = null;
+
+    function playM3u8Inline(url, title) {
+        // 先销毁已有播放器
+        destroyPlayer();
+
+        const overlay = document.createElement("div");
+        overlay.id = "km-player-overlay";
+        overlay.style.cssText = `
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(0,0,0,0.85); display: flex; align-items: center;
+            justify-content: center; z-index: 999999; backdrop-filter: blur(10px);
+        `;
+
+        const playerContainer = document.createElement("div");
+        playerContainer.style.cssText = `
+            width: 800px; max-width: 90%; background: #111; border-radius: 12px;
+            border: 1px solid #333; overflow: hidden; box-shadow: 0 25px 50px rgba(0,0,0,0.8);
+            position: relative;
+        `;
+
+        const header = document.createElement("div");
+        header.style.cssText = `
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 20px; border-bottom: 1px solid #222; background: #161616;
+        `;
+        header.innerHTML = `
+            <span style="color:#fff; font-size:14px; font-weight:bold; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:80%;">${title}</span>
+            <button id="km-player-close" style="background:rgba(255,255,255,0.1); border:none; color:#aaa; font-size:20px; width:30px; height:30px; border-radius:50%; cursor:pointer; display:flex; align-items:center; justify-content:center;">&times;</button>
+        `;
+        playerContainer.appendChild(header);
+
+        const videoDiv = document.createElement("div");
+        videoDiv.id = "km-dplayer";
+        videoDiv.style.height = "450px";
+        playerContainer.appendChild(videoDiv);
+
+        overlay.appendChild(playerContainer);
+        document.body.appendChild(overlay);
+
+        // 初始化 DPlayer + hls.js
+        activePlayer = new DPlayer({
+            container: videoDiv,
+            autoplay: true,
+            theme: '#ff9f0a',
+            loop: false,
+            lang: 'zh-cn',
+            screenshot: true,
+            hotkey: true,
+            video: {
+                url: url,
+                type: 'customHls',
+                customType: {
+                    customHls: function (videoEl) {
+                        const hlsInstance = new Hls({ maxBufferSize: 100000000 });
+                        hlsInstance.loadSource(url);
+                        hlsInstance.attachMedia(videoEl);
+                    }
+                }
+            }
+        });
+
+        // 移步移动端长按加速
+        const playerVideo = videoDiv.querySelector('video');
+        if (playerVideo) {
+            let longPressTimer = null;
+            let wasSpeed = 1;
+            let isLongPressing = false;
+            let hasMoved = false;
+            let touchStartX = 0;
+            let touchStartY = 0;
+
+            const showSpeedHint = (msg) => {
+                let hint = overlay.querySelector('.km-speed-hint');
+                if (!hint) {
+                    hint = document.createElement('div');
+                    hint.className = 'km-speed-hint';
+                    hint.style.cssText = `
+                        position: absolute; top: 25%; left: 50%; transform: translate(-50%, -50%);
+                        background: rgba(0,0,0,0.75); color: #ff9f0a; padding: 8px 18px; border-radius: 20px;
+                        font-size: 13px; z-index: 999999; pointer-events: none; font-weight: bold;
+                        border: 1px solid rgba(255, 159, 10, 0.4); box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+                    `;
+                    overlay.appendChild(hint);
+                }
+                hint.innerText = msg;
+                hint.style.display = 'block';
+            };
+
+            const hideSpeedHint = () => {
+                const hint = overlay.querySelector('.km-speed-hint');
+                if (hint) hint.style.display = 'none';
+            };
+
+            playerVideo.addEventListener('touchstart', (e) => {
+                if (e.touches.length !== 1) return;
+                const touch = e.touches[0];
+                touchStartX = touch.clientX;
+                touchStartY = touch.clientY;
+                hasMoved = false;
+                isLongPressing = false;
+
+                longPressTimer = setTimeout(() => {
+                    if (hasMoved) return;
+                    isLongPressing = true;
+                    wasSpeed = playerVideo.playbackRate;
+                    playerVideo.playbackRate = 2.0;
+                    showSpeedHint('▶▶ 2.0x 长按加速中');
+                }, 500);
+            }, { passive: true });
+
+            playerVideo.addEventListener('touchmove', (e) => {
+                if (e.touches.length !== 1) return;
+                const touch = e.touches[0];
+                const dx = touch.clientX - touchStartX;
+                const dy = touch.clientY - touchStartY;
+                if (!hasMoved && (Math.abs(dx) > 12 || Math.abs(dy) > 12)) {
+                    hasMoved = true;
+                    if (longPressTimer) {
+                        clearTimeout(longPressTimer);
+                        longPressTimer = null;
+                    }
+                }
+            }, { passive: true });
+
+            const endTouch = () => {
+                if (longPressTimer) {
+                    clearTimeout(longPressTimer);
+                    longPressTimer = null;
+                }
+                if (isLongPressing) {
+                    playerVideo.playbackRate = wasSpeed;
+                    hideSpeedHint();
+                    isLongPressing = false;
+                }
+                hasMoved = false;
+            };
+
+            playerVideo.addEventListener('touchend', endTouch, { passive: true });
+            playerVideo.addEventListener('touchcancel', endTouch, { passive: true });
+        }
+
+        // 绑定关闭事件
+        header.querySelector("#km-player-close").addEventListener("click", destroyPlayer);
+        overlay.addEventListener("click", (e) => {
+            if (e.target === overlay) destroyPlayer();
+        });
+    }
+
+    function destroyPlayer() {
+        if (activePlayer) {
+            try { activePlayer.destroy(); } catch (e) {}
+            activePlayer = null;
+        }
+        const overlay = document.getElementById("km-player-overlay");
+        if (overlay) overlay.remove();
+    }
+
+    // ========== CSS 与 UI 面板逻辑 ==========
+
+    let floatBtn = null;
+    let panel = null;
+    let toastEl = null;
+
+    function injectStyles() {
+        GM_addStyle(`
+            /* 全局秒杀快猫所有内置轮播广告、App下载推广与遮罩 */
+            .banner_vue, .rightside, 
+            a[href*="download"], a[href*="app"],
+            div[class*="download"], div[class*="app-download"],
+            div[class*="pop-mask"], div[class*="pop-box"],
+            div[class*="vip-mask"], div[class*="vip-limit-box"] {
+                display: none !important;
+            }
+
+            #km-float-btn {
+                position: fixed; bottom: 30px; right: 30px; width: 54px; height: 54px;
+                border-radius: 50%; background: ${SETTINGS.themeColor}; color: #fff;
+                font-size: 24px; display: flex; align-items: center; justify-content: center;
+                cursor: pointer; z-index: 2147483647; box-shadow: ${SETTINGS.themeShadow};
+                transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); user-select: none;
+                border: none; outline: none;
+            }
+            #km-float-btn:hover { transform: scale(1.1) rotate(15deg); }
+            #km-float-btn.has-capture {
+                background: linear-gradient(135deg, #30d158 0%, #10d3ab 100%);
+                box-shadow: 0 4px 15px rgba(48, 209, 88, 0.4);
+            }
+            #km-panel {
+                position: fixed; bottom: 95px; right: 30px; width: 420px; max-height: 480px;
+                background: rgba(15, 15, 20, 0.95); backdrop-filter: blur(15px);
+                border-radius: 16px; border: 1px solid rgba(255, 255, 255, 0.08);
+                box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6); z-index: 2147483646;
+                display: none; flex-direction: column; overflow: hidden;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            }
+            #km-panel.visible { display: flex; }
+            #km-panel-header {
+                display: flex; align-items: center; justify-content: space-between;
+                padding: 16px 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            }
+            #km-panel-header h3 { margin: 0; font-size: 15px; font-weight: bold; color: #fff; }
+            #km-panel-close {
+                width: 28px; height: 28px; border-radius: 50%; background: rgba(255, 255, 255, 0.08);
+                border: none; color: #aaa; font-size: 16px; cursor: pointer; display: flex;
+                align-items: center; justify-content: center; transition: all 0.2s;
+            }
+            #km-panel-close:hover { background: rgba(255, 59, 48, 0.3); color: #ff3b30; }
+            #km-panel-body { flex: 1; overflow-y: auto; padding: 12px 16px; }
+            .km-item {
+                display: flex; flex-direction: column; gap: 8px; padding: 12px; margin-bottom: 10px;
+                background: rgba(255, 255, 255, 0.03); border-radius: 10px;
+                border: 1px solid rgba(255, 255, 255, 0.05); transition: background 0.2s;
+            }
+            .km-item:hover { background: rgba(255, 255, 255, 0.06); }
+            .km-title-line { font-size: 13px; font-weight: 500; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            .km-action-line { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+            .km-badge {
+                padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600;
+                background: rgba(255, 159, 10, 0.15); color: #ff9f0a;
+            }
+            .km-btn-group { display: flex; gap: 6px; }
+            .km-action-btn {
+                padding: 4px 10px; border-radius: 6px; border: none; font-size: 11px; cursor: pointer; transition: all 0.2s;
+            }
+            .km-play-btn { background: #ff9f0a; color: #000; font-weight: bold; }
+            .km-copy-btn { background: rgba(255,255,255,0.08); color: #fff; border: 1px solid rgba(255,255,255,0.1); }
+            .km-copy-btn:hover { background: rgba(255,255,255,0.15); }
+            .km-empty { text-align: center; color: #666; padding: 50px 20px; font-size: 13px; }
+            .km-page-btn {
+                padding: 6px 16px; border-radius: 8px; border: 1px solid #444; background: #222;
+                color: #fff; font-size: 12px; cursor: pointer; transition: all 0.2s;
+            }
+            .km-page-btn:hover { background: #333; border-color: #ff9f0a; }
+            #km-toast {
+                position: fixed; top: 20px; left: 50%; transform: translateX(-50%) translateY(-100px);
+                padding: 10px 24px; border-radius: 8px; background: rgba(10, 10, 15, 0.95);
+                color: #fff; font-size: 13px; z-index: 2147483647; transition: transform 0.3s ease;
+                pointer-events: none; backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.1);
+            }
+            #km-toast.show { transform: translateX(-50%) translateY(0); }
+            html body #km-player-overlay #km-dplayer .dplayer-video-wrap,
+            html body #km-player-overlay #km-dplayer video.dplayer-video {
+                width: 100% !important;
+                height: 100% !important;
+                min-height: 100% !important;
+                min-width: 100% !important;
+                max-height: none !important;
+                max-width: none !important;
+                top: 0 !important;
+                left: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                transform: none !important;
+            }
+            html body #km-player-overlay #km-dplayer video.dplayer-video {
+                position: absolute !important;
+                object-fit: contain !important;
+            }
+
+            /* 移动端适配 */
+            @media (max-width: 768px) {
+                #km-player-overlay {
+                    padding: 0 !important;
+                }
+                #km-player-overlay > div {
+                    width: 100% !important;
+                    height: 100% !important;
+                    max-width: 100% !important;
+                    border-radius: 0 !important;
+                    border: none !important;
+                    display: flex;
+                    flex-direction: column;
+                    justify-content: center;
+                }
+                #km-dplayer {
+                    height: 60vh !important;
+                }
+            }
+        `);
+    }
+
+    function createUI() {
+        if (document.getElementById('km-float-btn')) return;
+
+        floatBtn = document.createElement('div');
+        floatBtn.id = 'km-float-btn';
+        floatBtn.innerHTML = '🐱';
+        floatBtn.addEventListener('click', () => panel.classList.toggle('visible'));
+        document.body.appendChild(floatBtn);
+
+        panel = document.createElement('div');
+        panel.id = 'km-panel';
+        panel.innerHTML = `
+            <div id="km-panel-header">
+                <h3>快猫视频解析与提取面板</h3>
+                <button id="km-panel-close">&times;</button>
+            </div>
+            <div id="km-panel-body">
+                <div class="km-empty">⏳ 暂无视频被捕获，正在监测中...</div>
+            </div>
+        `;
+        document.body.appendChild(panel);
+
+        panel.querySelector('#km-panel-close').addEventListener('click', () => panel.classList.remove('visible'));
+
+        document.addEventListener('click', (e) => {
+            if (panel && panel.classList.contains('visible') && !panel.contains(e.target) && !floatBtn.contains(e.target)) {
+                panel.classList.remove('visible');
+            }
+        });
+
+        toastEl = document.createElement('div');
+        toastEl.id = 'km-toast';
+        document.body.appendChild(toastEl);
+    }
+
+    function showToast(msg) {
+        if (!toastEl) return;
+        toastEl.textContent = msg;
+        toastEl.classList.add('show');
+        setTimeout(() => toastEl.classList.remove('show'), 2500);
+    }
+
+    function updateUI() {
+        if (!floatBtn) return;
+        if (capturedUrls.length > 0) {
+            floatBtn.classList.add('has-capture');
+            floatBtn.innerHTML = `<span style="font-size:15px; font-weight:bold;">${capturedUrls.length}</span>`;
+        } else {
+            floatBtn.classList.remove('has-capture');
+            floatBtn.innerHTML = '🐱';
+        }
+
+        if (!panel) return;
+        const body = panel.querySelector('#km-panel-body');
+        if (capturedUrls.length === 0) {
+            body.innerHTML = '<div class="km-empty">⏳ 暂无视频被捕获，正在监测中...</div>';
+            return;
+        }
+
+        let html = '';
+        capturedUrls.forEach((item, index) => {
+            html += `
+                <div class="km-item">
+                    <div class="km-title-line" title="${item.title}">${item.title}</div>
+                    <div class="km-action-line">
+                        <span class="km-badge">${item.source}</span>
+                        <div class="km-btn-group">
+                            <button class="km-action-btn km-play-btn" data-index="${index}">▶ 播放</button>
+                            <button class="km-action-btn km-copy-btn" data-index="${index}">复制</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+        body.innerHTML = html;
+
+        // 绑定按钮事件
+        body.querySelectorAll(".km-play-btn").forEach(btn => {
+            btn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                const item = capturedUrls[btn.dataset.index];
+                playM3u8Inline(item.url, item.title);
+            });
+        });
+
+        body.querySelectorAll(".km-copy-btn").forEach(btn => {
+            btn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                const item = capturedUrls[btn.dataset.index];
+                try {
+                    GM_setClipboard(item.url, 'text');
+                    showToast('✅ 复制成功');
+                } catch (err) {
+                    navigator.clipboard.writeText(item.url)
+                        .then(() => showToast('✅ 复制成功'))
+                        .catch(() => showToast('❌ 复制失败'));
+                }
+            });
+        });
+    }
+
+    // ========== 全通道监控捕获 (XHR + Fetch + Performance + Player) ==========
+
+    function processCapturedUrl(url, source) {
+        if (!url || typeof url !== 'string') return;
+        url = url.trim();
+        if (url.startsWith('blob:') || url.startsWith('data:')) return;
+        if (/\/api\//.test(url)) return; // 过滤 API 请求
+
+        let targetUrl = '';
+        if (url.includes('.m3u8')) {
+            targetUrl = url;
+        } else if (url.includes('.ts')) {
+            // 从 TS 分片反推 m3u8
+            targetUrl = url.replace(/\/[^\/]+\.ts.*/, '/index.m3u8');
+        }
+
+        if (targetUrl && targetUrl.includes('.m3u8')) {
+            // 将预览版标志自动转换为完整版 (_wm.mp4)
+            let fullUrl = targetUrl.replace(/_preview\.mp4/g, '_wm.mp4')
+                                   .replace(/_preview/g, '_wm.mp4')
+                                   .replace(/_preview/g, '_wm');
+
+            // 剥离所有的查询参数
+            fullUrl = fullUrl.split('?')[0];
+
+            // 提取唯一视频ID并动态捕获视频 CDN 域名
+            let videoId = 'KM_Video';
+            try {
+                const urlObj = new URL(url, window.location.origin);
+                capturedVideoCdn = urlObj.origin + "/";
+            } catch(e) {}
+
+            const cleanUrl = targetUrl.split('?')[0];
+            const segments = cleanUrl.split('/');
+            const lastSegment = segments[segments.length - 1];
+            if (lastSegment && lastSegment.includes('.m3u8') && lastSegment !== 'index.m3u8') {
+                videoId = lastSegment.replace('.m3u8', '').replace(/_preview\.mp4|_preview|_wm\.mp4|_wm/, '');
+            } else if (segments.length >= 2) {
+                const parentSegment = segments[segments.length - 2];
+                if (parentSegment) {
+                    videoId = parentSegment.replace(/_preview\.mp4|_preview|_wm\.mp4|_wm/, '');
+                }
+            }
+
+            // 切换视频时清空历史
+            if (videoId !== 'KM_Video' && videoId !== currentActiveVideoId) {
+                currentActiveVideoId = videoId;
+                capturedUrls = [];
+                console.log(`[快猫提取] 检测到切换视频为: ${videoId}，已自动清空历史缓存`);
+            }
+
+            addCaptured(fullUrl, `视频_${videoId} (已解锁完整版)`, source);
+        }
+    }
+
+    // 1. XHR Hook
+    function installXHRHook() {
+        const win = unsafeWindow || window;
+        const OriginalXHR = win.XMLHttpRequest;
+        if (!OriginalXHR) return;
+        function HookedXHR() {
+            const xhr = new OriginalXHR();
+            let _url = '';
+            const origOpen = xhr.open;
+            xhr.open = function (method, url, ...args) {
+                _url = url;
+                // 动态捕获最新 API 域名
+                if (url && (url.includes('/api/video/') || url.includes('/api/'))) {
+                    try {
+                        const urlObj = new URL(url, win.location.origin);
+                        capturedApiDomain = urlObj.origin;
+                        console.log('[快猫提取] XHR 捕获到最新 API 域名:', capturedApiDomain);
+                    } catch(e) {}
+                }
+                return origOpen.apply(xhr, [method, url, ...args]);
+            };
+            const origSend = xhr.send;
+            xhr.send = function (...args) {
+                xhr.addEventListener('load', function () {
+                    try {
+                        processCapturedUrl(_url, 'XHR Hook');
+                    } catch (e) {}
+                });
+                return origSend.apply(xhr, args);
+            };
+            return xhr;
+        }
+        HookedXHR.prototype = OriginalXHR.prototype;
+        Object.assign(HookedXHR, OriginalXHR);
+        try {
+            Object.defineProperty(win, 'XMLHttpRequest', { value: HookedXHR, writable: true, configurable: true });
+        } catch(e) { win.XMLHttpRequest = HookedXHR; }
+        console.log('[快猫提取] XHR Hook 捕获通道已启动');
+    }
+
+    // 2. Fetch Hook
+    function installFetchHook() {
+        const win = unsafeWindow || window;
+        if (typeof win.fetch !== 'function') return;
+        const origFetch = win.fetch.bind(win);
+        win.fetch = function (input, init) {
+            const url = (typeof input === 'string') ? input : (input && input.url) || '';
+            // 动态捕获最新 API 域名
+            if (url && (url.includes('/api/video/') || url.includes('/api/'))) {
+                try {
+                    const urlObj = new URL(url, win.location.origin);
+                    capturedApiDomain = urlObj.origin;
+                    console.log('[快猫提取] Fetch 捕获到最新 API 域名:', capturedApiDomain);
+                } catch(e) {}
+            }
+            processCapturedUrl(url, 'Fetch Hook');
+            return origFetch(input, init);
+        };
+        console.log('[快猫提取] Fetch Hook 捕获通道已启动');
+    }
+
+    // 3. Performance API 监控
+    function installPerformanceObserver() {
+        try {
+            const perfObserver = new PerformanceObserver((list) => {
+                for (const entry of list.getEntries()) {
+                    const name = entry.name || '';
+                    if (name.includes('.m3u8') || name.includes('.ts')) {
+                        processCapturedUrl(name, 'Performance API');
+                    }
+                }
+            });
+            perfObserver.observe({ type: 'resource', buffered: true });
+            console.log('[快猫提取] Performance Observer 捕获通道已启动');
+        } catch (e) {}
+    }
+
+    // 4. 播放器实例劫持
+    function installPlayerHijack() {
+        const scan = () => {
+            const videos = document.querySelectorAll('video');
+            for (const video of videos) {
+                const hls = video.__hls || video.hls || video._hls;
+                if (hls && hls.url) {
+                    processCapturedUrl(hls.url, '播放器劫持');
+                }
+                if (video.src && (video.src.includes('.m3u8') || video.src.includes('.ts'))) {
+                    processCapturedUrl(video.src, '播放器劫持');
+                }
+            }
+        };
+        setInterval(scan, 2000);
+        console.log('[快猫提取] 播放器劫持 捕获通道已启动');
+    }
+
+    // ========== 初始化与运行监控 ==========
+    function init() {
+        if (window.location.pathname.includes('d2b.html')) {
+            window.location.replace(window.location.origin + '/pc/index');
+            return;
+        }
+        injectStyles();
+        createUI();
+
+        // 启动网络与播放层拦截捕获
+        installXHRHook();
+        installFetchHook();
+        installPerformanceObserver();
+        installPlayerHijack();
+
+        // 启动页面路由轮询监控
+        let previousUrl = '';
+        const routeObserver = new MutationObserver(() => {
+            const nowUrl = window.location.href;
+            if (nowUrl !== previousUrl) {
+                previousUrl = nowUrl;
+                handleRouteChanged();
+            }
+        });
+        routeObserver.observe(document, { subtree: true, childList: true });
+
+        handleRouteChanged();
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+
+    console.log('[快猫提取] 视频加解密与在线播放器已成功挂载。');
+})();
