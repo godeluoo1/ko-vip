@@ -24,6 +24,43 @@
 (function () {
     'use strict';
 
+    // ========== 安卓原生 WebView 环境 Polyfill 兼容垫片 ==========
+    if (typeof GM_addStyle === 'undefined') {
+        const gm_addstyle_impl = function (css) {
+            try {
+                const style = document.createElement('style');
+                style.type = 'text/css';
+                style.innerHTML = css;
+                (document.head || document.documentElement || document.body).appendChild(style);
+            } catch (e) {
+                console.error('[快猫劫持-Polyfill] GM_addStyle 失败:', e);
+            }
+        };
+        window.GM_addStyle = gm_addstyle_impl;
+        var GM_addStyle = gm_addstyle_impl;
+    }
+    if (typeof GM_setClipboard === 'undefined') {
+        const gm_setclipboard_impl = function (text) {
+            try {
+                const input = document.createElement('textarea');
+                input.value = text;
+                (document.body || document.documentElement).appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                (document.body || document.documentElement).removeChild(input);
+            } catch (e) {
+                console.error('[快猫劫持-Polyfill] GM_setClipboard 失败:', e);
+            }
+        };
+        window.GM_setClipboard = gm_setclipboard_impl;
+        var GM_setClipboard = gm_setclipboard_impl;
+    }
+    if (typeof unsafeWindow === 'undefined') {
+        window.unsafeWindow = window;
+        var unsafeWindow = window;
+    }
+    console.log('[快猫劫持] 安卓原生 WebView 兼容垫片加载完成！');
+
     // ========== 监听返回/后退键以关闭自定义播放器 (防止物理返回键直接退回首页) ==========
     window.addEventListener('popstate', (event) => {
         const overlay = document.getElementById("km-player-overlay");
@@ -82,12 +119,22 @@
         } catch (e) {}
     }
 
-    // 150ms 轮询保底
-    setInterval(syncImages, 150);
+    // requestAnimationFrame 节流同步（减少 CPU 密集遍历，防平板悬浮窗卡顿 ANR）
+    let syncTimer = null;
+    function throttledSyncImages() {
+        if (syncTimer) return;
+        syncTimer = requestAnimationFrame(() => {
+            syncImages();
+            syncTimer = null;
+        });
+    }
 
-    // MutationObserver 0ms 实时响应图片渲染
+    // 450ms 轮询保底
+    setInterval(throttledSyncImages, 450);
+
+    // MutationObserver 0ms 帧同步响应图片渲染
     try {
-        const imgObserver = new MutationObserver(syncImages);
+        const imgObserver = new MutationObserver(throttledSyncImages);
         imgObserver.observe(document.documentElement, {
             subtree: true,
             childList: true,
@@ -936,7 +983,7 @@
         if (scrollTop + clientHeight >= scrollHeight - 350) {
             triggerInfiniteScroll();
         }
-    });
+    }, { passive: true });
 
     async function triggerInfiniteScroll() {
         if (isLoadingPage) return;
