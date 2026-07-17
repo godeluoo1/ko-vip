@@ -119,22 +119,12 @@
         } catch (e) {}
     }
 
-    // requestAnimationFrame 节流同步（减少 CPU 密集遍历，防平板悬浮窗卡顿 ANR）
-    let syncTimer = null;
-    function throttledSyncImages() {
-        if (syncTimer) return;
-        syncTimer = requestAnimationFrame(() => {
-            syncImages();
-            syncTimer = null;
-        });
-    }
+    // 100ms 超高频轮询保底 (极致瞬时响应，为 Y700 顶级旗舰平板性能全开)
+    setInterval(syncImages, 100);
 
-    // 450ms 轮询保底
-    setInterval(throttledSyncImages, 450);
-
-    // MutationObserver 0ms 帧同步响应图片渲染
+    // MutationObserver 0ms 瞬时无延迟同步图片渲染
     try {
-        const imgObserver = new MutationObserver(throttledSyncImages);
+        const imgObserver = new MutationObserver(syncImages);
         imgObserver.observe(document.documentElement, {
             subtree: true,
             childList: true,
