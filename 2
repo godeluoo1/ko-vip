@@ -24,42 +24,7 @@
 (function () {
     'use strict';
 
-    // ========== 安卓原生 WebView 环境 Polyfill 兼容垫片 ==========
-    if (typeof GM_addStyle === 'undefined') {
-        const gm_addstyle_impl = function (css) {
-            try {
-                const style = document.createElement('style');
-                style.type = 'text/css';
-                style.innerHTML = css;
-                (document.head || document.documentElement || document.body).appendChild(style);
-            } catch (e) {
-                console.error('[快猫劫持-Polyfill] GM_addStyle 失败:', e);
-            }
-        };
-        window.GM_addStyle = gm_addstyle_impl;
-        var GM_addStyle = gm_addstyle_impl;
-    }
-    if (typeof GM_setClipboard === 'undefined') {
-        const gm_setclipboard_impl = function (text) {
-            try {
-                const input = document.createElement('textarea');
-                input.value = text;
-                (document.body || document.documentElement).appendChild(input);
-                input.select();
-                document.execCommand('copy');
-                (document.body || document.documentElement).removeChild(input);
-            } catch (e) {
-                console.error('[快猫劫持-Polyfill] GM_setClipboard 失败:', e);
-            }
-        };
-        window.GM_setClipboard = gm_setclipboard_impl;
-        var GM_setClipboard = gm_setclipboard_impl;
-    }
-    if (typeof unsafeWindow === 'undefined') {
-        window.unsafeWindow = window;
-        var unsafeWindow = window;
-    }
-    console.log('[快猫劫持] 安卓原生 WebView 兼容垫片加载完成！');
+
 
     // ========== 监听返回/后退键以关闭自定义播放器 (防止物理返回键直接退回首页) ==========
     window.addEventListener('popstate', (event) => {
@@ -146,6 +111,39 @@
     }, 300);
 
     const WIN = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+
+    // ========== 浏览器与 WebView 安全兼容接口 (防沙箱变量提升污染) ==========
+    function safeAddStyle(css) {
+        if (typeof GM_addStyle !== 'undefined') {
+            GM_addStyle(css);
+        } else {
+            try {
+                const style = document.createElement('style');
+                style.type = 'text/css';
+                style.innerHTML = css;
+                (document.head || document.documentElement || document.body).appendChild(style);
+            } catch (e) {
+                console.error('[快猫劫持-SafeStyle] 添加样式失败:', e);
+            }
+        }
+    }
+
+    function safeSetClipboard(text) {
+        if (typeof GM_setClipboard !== 'undefined') {
+            GM_setClipboard(text);
+        } else {
+            try {
+                const input = document.createElement('textarea');
+                input.value = text;
+                (document.body || document.documentElement).appendChild(input);
+                input.select();
+                document.execCommand('copy');
+                (document.body || document.documentElement).removeChild(input);
+            } catch (e) {
+                console.error('[快猫劫持-SafeClipboard] 复制剪贴板失败:', e);
+            }
+        }
+    }
 
     // ========== 全局配置与状态 ==========
     const SETTINGS = {
@@ -947,7 +945,7 @@
         response.data.video_list.forEach((item) => {
             const playUrl = getPlayUrlFromCover(item.cover);
             const li = document.createElement("li");
-            li.style.cssText = "width:calc(16.6% - 10px); margin:5px; box-sizing:border-box;";
+            li.className = "km-item";
             const safeCover = toAbsoluteUrl(item.cover || '');
             const card = createVideoCard({
                 cover: safeCover, gold: item.gold || 0,
@@ -1747,7 +1745,7 @@
     function injectStyles() {
         if (stylesInjected || document.getElementById('km-style')) return;
         stylesInjected = true;
-        GM_addStyle(`
+        safeAddStyle(`
             .search-result-content {
                 display: block !important;
                 visibility: visible !important;
@@ -1770,6 +1768,21 @@
                 z-index: 9999 !important;
                 background: #121212 !important;
                 width: 100% !important;
+            }
+            .km-item {
+                margin: 5px !important;
+                box-sizing: border-box !important;
+                list-style: none !important;
+                width: calc(16.6% - 10px) !important;
+            }
+            @media (max-width: 1200px) {
+                .km-item { width: calc(25% - 10px) !important; }
+            }
+            @media (max-width: 768px) {
+                .km-item { width: calc(33.3% - 10px) !important; }
+            }
+            @media (max-width: 480px) {
+                .km-item { width: calc(50% - 10px) !important; }
             }
             .pc-posters, .nut-swiper, .nut-swiper-pagination,
             .pd-bn, .pd-bn-50, .auto-register-popup, .auto-register,
@@ -2330,8 +2343,8 @@
             if (actionBtn.classList.contains('km-play-btn')) {
                 playM3u8Inline(item.url, item.title);
             } else if (actionBtn.classList.contains('km-copy-btn')) {
-                try { GM_setClipboard(item.url, 'text'); showToast('✅ 复制成功'); }
-                catch (err) { navigator.clipboard.writeText(item.url).then(() => showToast('✅ 复制成功')).catch(() => showToast('❌ 复制失败')); }
+                safeSetClipboard(item.url);
+                showToast('✅ 复制成功');
             }
         });
 
