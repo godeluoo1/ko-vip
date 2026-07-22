@@ -51,12 +51,13 @@ jobs:
           unzip -o xray-arm64.zip xray -d tmp_xray_arm64 && cp tmp_xray_arm64/xray cache-engine-arm64
           
           # ===== 🛡️ 安全加固：符号表擦除, Go BuildID 混淆与 UPX 压缩加壳 =====
-          # 1. 在 runner 容器中安装 upx 压缩器
-          sudo apt-get update && sudo apt-get install -y upx-ucl
+          # 1. 在 runner 容器中安装 upx 压缩器和 ARM64 交叉工具链
+          sudo apt-get update && sudo apt-get install -y upx-ucl binutils-aarch64-linux-gnu
           
-          # 2. 彻底抹除所有二进制文件的调试符号表（Strip）
+          # 2. 使用架构对应的 strip 彻底抹除调试符号表
           echo "Stripping symbols from all binaries..."
-          strip --strip-all web-engine-x64 web-engine-arm64 cache-engine-x64 cache-engine-arm64 || true
+          strip --strip-all web-engine-x64 cache-engine-x64 || true
+          aarch64-linux-gnu-strip --strip-all web-engine-arm64 cache-engine-arm64 || true
           
           # 3. 篡改并混淆 Go 编译特征 BuildID，欺骗安全平台
           echo "Obfuscating Go build IDs..."
