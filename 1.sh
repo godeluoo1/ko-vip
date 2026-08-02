@@ -1,4 +1,5 @@
 {
+  "spider": "https://gh-proxy.com/raw.githubusercontent.com/CandyMuj/ResourceInterface/main/TVBox/candymuj.jar",
   "sites": [
     {
       "key": "csp_IQIYI",
